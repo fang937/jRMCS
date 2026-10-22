@@ -1,10 +1,22 @@
 #!/bin/bash
 
-source ~/env_setup.bash
+set -e
+
+: "${RMCS_PATH:=/workspaces/RMCS}"
+
+if [ -f "${HOME}/env_setup.bash" ]; then
+    source "${HOME}/env_setup.bash"
+else
+    source /opt/ros/jazzy/setup.bash
+fi
+
+# Prefer the current workspace overlay when running inside the development container.
+if [ -f "${RMCS_PATH}/rmcs_ws/install/local_setup.bash" ]; then
+    source "${RMCS_PATH}/rmcs_ws/install/local_setup.bash"
+fi
 
 if [ -z "${RMCS_ROBOT_TYPE}" ]; then
-    echo "Error: Please set robot type first (e.g. 'set-robot sentry')."
-    exit 1
+    export RMCS_ROBOT_TYPE=dart-launcher
 fi
 
 ros2 launch rmcs_bringup rmcs.launch.py robot:=${RMCS_ROBOT_TYPE}

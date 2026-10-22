@@ -16,7 +16,7 @@ fi
 eval "$(register-python-argcomplete ros2)"
 eval "$(register-python-argcomplete colcon)"
 
-export RMCS_ROBOT_TYPE=""
+export RMCS_ROBOT_TYPE="dart-launcher"
 export PATH="${PATH}:${RMCS_PATH}/.script"
 
 fpath=("${RMCS_PATH}/.script/complete" $fpath)

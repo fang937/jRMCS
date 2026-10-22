@@ -13,4 +13,4 @@ elif [ -f "${RMCS_PATH}/rmcs_ws/install/local_setup.bash" ]; then
     source "${RMCS_PATH}/rmcs_ws/install/local_setup.bash"
 fi
 
-export RMCS_ROBOT_TYPE=""
+export RMCS_ROBOT_TYPE="dart-launcher"

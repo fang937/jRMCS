@@ -1,0 +1,132 @@
+rmcs_executor:
+  ros__parameters:
+    update_rate: 1000.0
+    components:
+      - rmcs_core::hardware::DartLauncher -> dart_launcher
+      - rmcs_core::controller::shooting::ShootingDartController -> shooting_dart_controller
+      - rmcs_core::controller::pid::PidController -> trigger_left_angle_pid
+      - rmcs_core::controller::pid::PidController -> trigger_left_velocity_pid
+      - rmcs_core::controller::pid::PidController -> trigger_right_angle_pid
+      - rmcs_core::controller::pid::PidController -> trigger_right_velocity_pid
+      - rmcs_core::controller::pid::PidController -> yaw_angle_pid
+      - rmcs_core::controller::pid::PidController -> yaw_velocity_pid
+      - rmcs_core::controller::pid::PidController -> distance_angle_pid
+      - rmcs_core::controller::pid::PidController -> distance_velocity_pid
+
+dart_launcher:
+  ros__parameters:
+    board_serial: ""
+    left_motor_zero_point: 0
+    right_motor_zero_point: 0
+    yaw_motor_zero_point: 0
+    distance_motor_zero_point: 0
+
+shooting_dart_controller:
+  ros__parameters:
+    joystick_left_bias_y: 0.0
+    joystick_sensitivity: 0.004
+    joystick_deadzone: 0.5
+    switch_debounce_ticks: 20
+    action_timeout_ticks: 1500
+    servo_fire_angles: [45.0, 90.0, 90.0, 90.0]
+    servo_safe_angles: [0.0, 0.0, 0.0, 0.0]
+    servo_reload1_angles: [90.0, 90.0, 90.0, 90.0]
+    servo_reload2_angles: [90.0, 90.0, 90.0, 90.0]
+    servo_reload3_angles: [90.0, 90.0, 90.0, 90.0]
+    servo_reload1_duration_ticks: 500
+    servo_reload2_duration_ticks: 500
+    servo_reload3_duration_ticks: 500
+    servo_reload_first_duration_ticks: 2000
+    servo_reload_third_duration_ticks: 4000
+    servo_reload_fourth_duration_ticks: 4000
+    fire_position_tolerance: 0.05
+    yaw_motor_velocity_limit: 10.0
+    distance_motor_velocity_limit: 10.0
+
+trigger_left_angle_pid:
+  ros__parameters:
+    measurement: /trigger/left_motor/angle
+    setpoint: /trigger/left_motor/control_angle
+    control: /trigger/left_motor/control_velocity
+    kp: 9.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -5.0
+    output_max: 5.0
+
+trigger_left_velocity_pid:
+  ros__parameters:
+    measurement: /trigger/left_motor/velocity
+    setpoint: /trigger/left_motor/control_velocity
+    control: /trigger/left_motor/control_torque
+    kp: 2.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -0.2
+    output_max: 0.2
+
+trigger_right_angle_pid:
+  ros__parameters:
+    measurement: /trigger/right_motor/angle
+    setpoint: /trigger/right_motor/control_angle
+    control: /trigger/right_motor/control_velocity
+    kp: 9.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -5.0
+    output_max: 5.0
+
+trigger_right_velocity_pid:
+  ros__parameters:
+    measurement: /trigger/right_motor/velocity
+    setpoint: /trigger/right_motor/control_velocity
+    control: /trigger/right_motor/control_torque
+    kp: 2.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -0.2
+    output_max: 0.2
+
+yaw_angle_pid:
+  ros__parameters:
+    measurement: /yaw_motor/angle
+    setpoint: /yaw_motor/control_angle
+    control: /yaw_motor/control_velocity
+    kp: 9.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -5.0
+    output_max: 5.0
+
+yaw_velocity_pid:
+  ros__parameters:
+    measurement: /yaw_motor/velocity
+    setpoint: /yaw_motor/control_velocity
+    control: /yaw_motor/control_torque
+    kp: 1.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -0.2
+    output_max: 0.2
+
+distance_angle_pid:
+  ros__parameters:
+    measurement: /distance_motor/angle
+    setpoint: /distance_motor/control_angle
+    control: /distance_motor/control_velocity
+    kp: 6.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -5.0
+    output_max: 5.0
+
+distance_velocity_pid:
+  ros__parameters:
+    measurement: /distance_motor/velocity
+    setpoint: /distance_motor/control_velocity
+    control: /distance_motor/control_torque
+    kp: 1.0
+    ki: 0.0
+    kd: 0.0
+    output_min: -0.2
+    output_max: 0.2
