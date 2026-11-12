@@ -1,5 +1,6 @@
 <library path="rmcs_core">
   <class type="rmcs_core::hardware::Flight" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs_core::hardware::DartLauncherHardware" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::hardware::SteeringHeroLittle" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::hardware::OmniInfantry" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::hardware::DeformableInfantryOmni" base_class_type="rmcs_executor::Component" />
@@ -37,6 +38,7 @@
   <class type="rmcs_core::controller::shooting::BulletFeederController17mm" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::controller::shooting::BulletFeederController42mm" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::controller::shooting::PutterController" base_class_type="rmcs_executor::Component" />
+  <class type="rmcs_core::controller::shooting::DartLauncherController" base_class_type="rmcs_executor::Component" />
   <class type="rmcs_core::controller::shooting::ShootingRecorder" base_class_type="rmcs_executor::Component" />
 
   <class type="rmcs_core::controller::pid::PidController" base_class_type="rmcs_executor::Component" />
