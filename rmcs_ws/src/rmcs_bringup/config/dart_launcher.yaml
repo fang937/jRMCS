@@ -15,7 +15,7 @@ rmcs_executor:
 
 dart_launcher_hardware:
   ros__parameters:
-    board_serial: ""
+    board_serial: "D4-CDEA-E7A7-6B0C-CAFD-ED52-DF91"
     left_motor_zero_point: 0
     right_motor_zero_point: 0
     yaw_motor_zero_point: 0
@@ -23,15 +23,19 @@ dart_launcher_hardware:
 
 dart_launcher_controller:
   ros__parameters:
-    fire_angle: 180.0
-    safe_angles: [90.0, 90.0, 90.0, 90.0]
-    reload1_angles: [0.0, 0.0, 90.0, 90.0]
-    reload2_angles: [0.0, 0.0, 90.0, 90.0]
-    reload3_angles: [0.0, 0.0, 90.0, 90.0]
-    reload1_return_angles: [90.0, 90.0, 90.0, 90.0]
-    reload2_return_angles: [90.0, 90.0, 90.0, 90.0]
-    reload3_return_angles: [90.0, 90.0, 90.0, 90.0]
-    fire_hold_ticks: 500
+    switch_debounce_ticks: 20
+    # Each angle array maps to servo 1/2/3/4.
+    fire_angles: [60.0, 90.0, 90.0, 90.0]
+    safe_angles: [130.0, 90.0, 0.0, 0.0]
+    fire_return_angles: [130.0, 90.0, 90.0, 0.0]
+    reload1_angles: [0.0, 180.0, 90.0, 90.0]
+    reload2_angles: [0.0, 180.0, 90.0, 90.0]
+    reload3_angles: [0.0, 180.0, 90.0, 90.0]
+    reload1_return_angles: [0.0, 90.0, 180.0, 0.0]
+    reload2_return_angles: [0.0, 90.0, 180.0, 0.0]
+    reload3_return_angles: [0.0, 90.0, 180.0, 0.0]
+    # At 1000 Hz, 2000 ticks hold the action for 2 seconds before return.
+    fire_hold_ticks: 2000
     trigger_fire_stroke: 0.5
     yaw_motor_velocity_limit: 10.0
     distance_motor_velocity_limit: 10.0
