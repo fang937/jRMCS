@@ -1,4 +1,6 @@
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 
@@ -32,6 +34,17 @@ public:
         for (std::size_t i = 0; i < servos_.size(); ++i)
             command_component_->register_input(
                 "/dart/servo/" + std::to_string(i + 1) + "/angle", servo_angles_[i], false);
+
+        RCLCPP_INFO(
+            get_logger(),
+            "Motor mapping (reATRM): CAN1 command=0x%03X; "
+            "left M3508 ID%u feedback=0x%03X slot1; right M3508 ID%u feedback=0x%03X slot2; "
+            "yaw M2006 ID%u feedback=0x%03X slot3; distance M2006 ID%u feedback=0x%03X slot4",
+            static_cast<unsigned>(yaw_motor_.send_id()),
+            static_cast<unsigned>(trigger_motors_[0].id()), static_cast<unsigned>(trigger_motors_[0].recv_id()),
+            static_cast<unsigned>(trigger_motors_[1].id()), static_cast<unsigned>(trigger_motors_[1].recv_id()),
+            static_cast<unsigned>(yaw_motor_.id()), static_cast<unsigned>(yaw_motor_.recv_id()),
+            static_cast<unsigned>(distance_motor_.id()), static_cast<unsigned>(distance_motor_.recv_id()));
 
         board_ = std::make_unique<librmcs::board::CBoard>(*this, get_parameter("board_serial").as_string());
         remote_control_ = std::make_unique<device::RemoteControl>(*this);
@@ -74,11 +87,18 @@ public:
     void can_receive_callback(const Spec::Can& can, const View::Can& data) override {
         if (data.is_extended_can_id || data.is_remote_transmission || data.can_data.size() < 8)
             return;
+        const std::size_t bus = can == Spec::kCans.kCan1 ? 0 : 1;
+        can_feedback_count_[bus].fetch_add(1, std::memory_order_relaxed);
+        last_can_id_[bus].store(data.can_id, std::memory_order_relaxed);
+        if (data.can_id >= 0x201 && data.can_id <= 0x208)
+            dji_feedback_mask_[bus].fetch_or(1U << (data.can_id - 0x201), std::memory_order_relaxed);
         if (can == Spec::kCans.kCan1) {
             for (auto& motor : trigger_motors_)
                 motor.match_then_store_status(data.can_id, data.can_data);
-            yaw_motor_.match_then_store_status(data.can_id, data.can_data);
-            distance_motor_.match_then_store_status(data.can_id, data.can_data);
+            if (yaw_motor_.match_then_store_status(data.can_id, data.can_data))
+                yaw_feedback_count_.fetch_add(1, std::memory_order_relaxed);
+            if (distance_motor_.match_then_store_status(data.can_id, data.can_data))
+                distance_feedback_count_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -108,19 +128,40 @@ public:
             servos_[3].angle(), static_cast<unsigned>(servos_[0].duty16()),
             static_cast<unsigned>(servos_[1].duty16()), static_cast<unsigned>(servos_[2].duty16()),
             static_cast<unsigned>(servos_[3].duty16()));
+        const auto yaw_command = yaw_motor_.generate_command();
+        const auto distance_command = distance_motor_.generate_command();
+        const auto yaw_feedback = yaw_feedback_count_.exchange(0, std::memory_order_relaxed);
+        const auto distance_feedback = distance_feedback_count_.exchange(0, std::memory_order_relaxed);
+        yaw_feedback_since_log_ += yaw_feedback;
+        distance_feedback_since_log_ += distance_feedback;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_motor_log_ >= std::chrono::seconds(1)) {
+            for (std::size_t bus = 0; bus < 2; ++bus)
+                RCLCPP_INFO(
+                    get_logger(),
+                    "CAN%zu RX: frames=%u last_id=0x%03X DJI_ID_mask=0x%02X (bit0..7 = motor ID1..8)",
+                    bus + 1, can_feedback_count_[bus].exchange(0, std::memory_order_relaxed),
+                    last_can_id_[bus].load(std::memory_order_relaxed),
+                    dji_feedback_mask_[bus].exchange(0, std::memory_order_relaxed));
+            RCLCPP_INFO(
+                get_logger(),
+                "CAN1 0x200 motors ID3/4: torque=[%.3f, %.3f] angle=[%.3f, %.3f] feedback_frames=[%u, %u]",
+                yaw_motor_.control_torque(), distance_motor_.control_torque(),
+                yaw_motor_.angle(), distance_motor_.angle(),
+                yaw_feedback_since_log_, distance_feedback_since_log_);
+            if (yaw_feedback_since_log_ == 0 || distance_feedback_since_log_ == 0)
+                RCLCPP_WARN(
+                    get_logger(), "Motor feedback missing: expected CAN1 yaw=0x203 distance=0x204; check motor IDs, power and CAN wiring");
+            yaw_feedback_since_log_ = distance_feedback_since_log_ = 0;
+            last_motor_log_ = now;
+        }
+        // M3508/M2006 IDs 1..4 occupy the four slots of the same 0x200 frame.
         builder
             .can_transmit(Spec::kCans.kCan1, {
                 .can_id = 0x200,
                 .can_data = device::CanPacket8{
                     trigger_motors_[0].generate_command(), trigger_motors_[1].generate_command(),
-                    device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{}}
-                                .as_bytes(),
-            })
-            .can_transmit(Spec::kCans.kCan1, {
-                .can_id = 0x1FF,
-                .can_data = device::CanPacket8{
-                    device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{},
-                    yaw_motor_.generate_command(), distance_motor_.generate_command()}
+                    yaw_command, distance_command}
                                 .as_bytes(),
             });
     }
@@ -144,14 +185,20 @@ private:
     std::shared_ptr<Command> command_component_;
     std::unique_ptr<device::RemoteControl> remote_control_;
     device::Dr16 dr16_;
+    std::array<std::atomic<unsigned>, 2> can_feedback_count_{};
+    std::array<std::atomic<unsigned>, 2> last_can_id_{};
+    std::array<std::atomic<unsigned>, 2> dji_feedback_mask_{};
+    std::atomic<unsigned> yaw_feedback_count_{0}, distance_feedback_count_{0};
+    unsigned yaw_feedback_since_log_ = 0, distance_feedback_since_log_ = 0;
+    std::chrono::steady_clock::time_point last_motor_log_ = std::chrono::steady_clock::now();
     std::array<device::CBoardServo, 4> servos_;
     std::array<device::CBoardButton, 3> buttons_;
     device::DjiMotor trigger_motors_[2]{
-        {*this, *command_component_, "/trigger/left_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM3508, 1}.enable_multi_turn_angle()},
-        {*this, *command_component_, "/trigger/right_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM3508, 2}.enable_multi_turn_angle()},
+        {*this, *command_component_, "/trigger/left_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM3508, 1}.set_encoder_zero_point(static_cast<int>(get_parameter("left_motor_zero_point").as_int())).enable_multi_turn_angle()},
+        {*this, *command_component_, "/trigger/right_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM3508, 2}.set_encoder_zero_point(static_cast<int>(get_parameter("right_motor_zero_point").as_int())).enable_multi_turn_angle()},
     };
-    device::DjiMotor yaw_motor_{*this, *command_component_, "/yaw_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 3}.enable_multi_turn_angle()};
-    device::DjiMotor distance_motor_{*this, *command_component_, "/distance_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 4}.enable_multi_turn_angle()};
+    device::DjiMotor yaw_motor_{*this, *command_component_, "/yaw_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 3}.set_encoder_zero_point(static_cast<int>(get_parameter("yaw_motor_zero_point").as_int())).enable_multi_turn_angle()};
+    device::DjiMotor distance_motor_{*this, *command_component_, "/distance_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 4}.set_encoder_zero_point(static_cast<int>(get_parameter("distance_motor_zero_point").as_int())).enable_multi_turn_angle()};
     InputInterface<double> servo_angles_[4];
     OutputInterface<bool> fire_button_output_;
     OutputInterface<bool> reload_button_output_;

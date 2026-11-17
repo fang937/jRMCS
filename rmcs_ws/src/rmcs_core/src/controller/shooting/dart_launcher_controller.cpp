@@ -45,7 +45,6 @@ public:
         reload_return_angles_[1] = read_angles("reload2_return_angles", safe_angles_);
         reload_return_angles_[2] = read_angles("reload3_return_angles", safe_angles_);
         fire_hold_ticks_ = std::max(1, static_cast<int>(get_parameter("fire_hold_ticks").as_int()));
-        trigger_fire_stroke_ = get_parameter("trigger_fire_stroke").as_double();
         reload_interval_ticks_[0] = std::max(1, static_cast<int>(get_parameter("reload1_interval_ticks").as_int()));
         reload_interval_ticks_[1] = std::max(1, static_cast<int>(get_parameter("reload2_interval_ticks").as_int()));
         reload_interval_ticks_[2] = std::max(1, static_cast<int>(get_parameter("reload3_interval_ticks").as_int()));
@@ -169,11 +168,6 @@ public:
                 state_ = State::kFiring;
                 ticks_ = fire_hold_ticks_;
                 set_angles(fire_angles_);
-                trigger_return_target_ = trigger_target_value_;
-                trigger_target_value_[0] -= trigger_fire_stroke_;
-                trigger_target_value_[1] += trigger_fire_stroke_;
-                *trigger_target_[0] = trigger_target_value_[0];
-                *trigger_target_[1] = trigger_target_value_[1];
             } else if (reload_edge && left != rmcs_msgs::Switch::DOWN) {
                 state_ = State::kReloading;
                 reload_stage_ = static_cast<int>(std::min<std::size_t>(reload_count_, 2));
@@ -187,14 +181,12 @@ public:
             if (--ticks_ <= 0) {
                 state_ = State::kReady;
                 set_angles(fire_return_angles_);
-                restore_trigger_target();
             }
             break;
         case State::kReloading:
             if (cancel) {
                 state_ = State::kReady;
                 set_angles(safe_angles_);
-                restore_trigger_target();
             } else if (--ticks_ <= 0) {
                 apply_reload_angles(reload_return_angles_[reload_stage_]);
                 state_ = State::kReady;
@@ -275,12 +267,6 @@ private:
             *distance_target_ = distance_target_value_;
         }
     }
-    void restore_trigger_target() {
-        trigger_target_value_ = trigger_return_target_;
-        *trigger_target_[0] = trigger_target_value_[0];
-        *trigger_target_[1] = trigger_target_value_[1];
-    }
-
     InputInterface<rmcs_msgs::Switch> switch_left_, switch_right_;
     InputInterface<Eigen::Vector2d> joystick_left_, joystick_right_;
     InputInterface<bool> fire_button_, reload_button_, reload_cancel_button_;
@@ -308,12 +294,10 @@ private:
     bool trigger_initialized_ = false;
     bool aim_initialized_ = false;
     std::array<double, 2> trigger_target_value_{};
-    std::array<double, 2> trigger_return_target_{};
     double yaw_target_value_ = 0.0;
     double distance_target_value_ = 0.0;
     double yaw_velocity_limit_ = 10.0;
     double distance_velocity_limit_ = 10.0;
-    double trigger_fire_stroke_ = 0.5;
     double trigger_adjust_sensitivity_ = 0.002;
     double joystick_deadzone_ = 0.08;
 };

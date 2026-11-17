@@ -36,10 +36,9 @@ dart_launcher_controller:
     reload3_return_angles: [0.0, 90.0, 180.0, 0.0]
     # At 1000 Hz, 2000 ticks hold the action for 2 seconds before return.
     fire_hold_ticks: 2000
-    trigger_fire_stroke: 0.5
     yaw_motor_velocity_limit: 10.0
     distance_motor_velocity_limit: 10.0
-    trigger_adjust_sensitivity: 0.002
+    trigger_adjust_sensitivity: 0.004
     joystick_deadzone: 0.08
     reload1_interval_ticks: 2000
     reload2_interval_ticks: 2000
@@ -50,44 +49,44 @@ dart_trigger_left_velocity_pid:
     measurement: /trigger/left_motor/velocity
     setpoint: /trigger/left_motor/control_velocity
     control: /trigger/left_motor/control_torque
-    kp: 0.02
+    kp: 0.04
     ki: 0.0
     kd: 0.0
-    output_max: 0.2
-    output_min: -0.2
+    output_max: 0.4
+    output_min: -0.4
 
 dart_trigger_left_angle_pid:
   ros__parameters:
     measurement: /trigger/left_motor/angle
     setpoint: /trigger/left_motor/control_angle
     control: /trigger/left_motor/control_velocity
-    kp: 5.0
+    kp: 10.0
     ki: 0.0
     kd: 0.0
-    output_max: 40.0
-    output_min: -40.0
+    output_max: 80.0
+    output_min: -80.0
 
 dart_trigger_right_velocity_pid:
   ros__parameters:
     measurement: /trigger/right_motor/velocity
     setpoint: /trigger/right_motor/control_velocity
     control: /trigger/right_motor/control_torque
-    kp: 0.02
+    kp: 0.04
     ki: 0.0
     kd: 0.0
-    output_max: 0.2
-    output_min: -0.2
+    output_max: 0.4
+    output_min: -0.4
 
 dart_trigger_right_angle_pid:
   ros__parameters:
     measurement: /trigger/right_motor/angle
     setpoint: /trigger/right_motor/control_angle
     control: /trigger/right_motor/control_velocity
-    kp: 5.0
+    kp: 10.0
     ki: 0.0
     kd: 0.0
-    output_max: 40.0
-    output_min: -40.0
+    output_max: 80.0
+    output_min: -80.0
 
 dart_yaw_velocity_pid:
   ros__parameters:
