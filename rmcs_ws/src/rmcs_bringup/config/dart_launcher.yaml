@@ -16,10 +16,24 @@ rmcs_executor:
 dart_launcher_hardware:
   ros__parameters:
     board_serial: "D4-CDEA-E7A7-6B0C-CAFD-ED52-DF91"
+    # 编码器零点：原始刻度 0..8191；位置反馈为减速箱输出轴多圈角度（rad）。
     left_motor_zero_point: 0
     right_motor_zero_point: 0
     yaw_motor_zero_point: 0
     distance_motor_zero_point: 0
+
+    # TF: odom_imu -> base_link -> yaw_link -> muzzle_link; base_link -> imu_link。
+    # 假设 C 板 BMI088 固定在底座。IMU 姿态不参与位置环，仅用于观测和 TF。
+    # 无磁力计：yaw 为启动后的相对航向，可能漂移；不估计底座平移。
+    publish_rate: 100.0  # ROS IMU 和动态 TF 最大发布频率 Hz；无新 IMU 样本不重复发布
+    # TODO(安装标定)：xyz 单位 m，rpy 单位 rad；零值表示重合/对齐占位，并非实测。
+    imu_xyz: [0.0, 0.0, 0.0]     # base_link 下 IMU 位置
+    imu_rpy: [0.0, 0.0, 0.0]     # sensor 坐标转到 base 的 Rz(yaw)*Ry(pitch)*Rx(roll)
+    yaw_xyz: [0.0, 0.0, 0.0]     # base_link 下偏航轴位置，绕局部 +Z 转动
+    yaw_angle_scale: 1.0         # 电机输出角 -> 实际偏航关节角传动系数，包含方向
+    yaw_angle_offset: 0.0        # 偏航关节角偏置 rad，与软件限位启动原点独立
+    muzzle_xyz: [0.0, 0.0, 0.0]  # yaw_link 下发射口位置
+    muzzle_rpy: [0.0, 0.0, 0.0]  # yaw_link 下发射口姿态，+X 为发射方向
 
 dart_launcher_controller:
   ros__parameters:
@@ -36,6 +50,19 @@ dart_launcher_controller:
     reload3_return_angles: [0.0, 90.0, 180.0, 0.0]
     # At 1000 Hz, 2000 ticks hold the action for 2 seconds before return.
     fire_hold_ticks: 2000
+    # 四台 DJI 电机统一为位置外环 -> 速度内环 -> 力矩输出，摇杆只修改位置目标。
+    # 软件限位：相对本次启动首次有效反馈位置的输出轴角度，单位 rad。
+    # TODO(机械标定)：分别填写实际下/上限；必须 min <= 0 <= max。
+    # 默认 [0, 0] 锁定启动位置；未标定前不允许摇杆移动。重启将重新取原点，并非绝对机械限位。
+    left_motor_position_min: 0.0      # 左扳机负方向行程（按实际机构标定）
+    left_motor_position_max: 0.0      # 左扳机正方向行程
+    right_motor_position_min: 0.0     # 右扳机负方向行程；与左侧旋向相反，独立标定
+    right_motor_position_max: 0.0     # 右扳机正方向行程
+    yaw_motor_position_min: 0.0       # 偏航负方向行程
+    yaw_motor_position_max: 0.0       # 偏航正方向行程
+    distance_motor_position_min: 0.0  # 距离机构负方向行程
+    distance_motor_position_max: 0.0  # 距离机构正方向行程
+    # 位置目标变化速率上限（rad/s），不是切换到速度控制模式。
     yaw_motor_velocity_limit: 10.0
     distance_motor_velocity_limit: 10.0
     trigger_adjust_sensitivity: 0.004
@@ -44,6 +71,8 @@ dart_launcher_controller:
     reload2_interval_ticks: 2000
     reload3_interval_ticks: 2000
 
+# 速度内环输出限制单位 N*m；位置外环输出限制单位 rad/s。
+# PID 增益和输出限幅沿用当前参数，实际负载下另行整定。
 dart_trigger_left_velocity_pid:
   ros__parameters:
     measurement: /trigger/left_motor/velocity

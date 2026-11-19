@@ -21,6 +21,7 @@ public:
         register_input("/remote/switch/right", switch_right_);
         register_input("/remote/joystick/left", joystick_left_);
         register_input("/remote/joystick/right", joystick_right_);
+        register_input("/dart/motors/feedback_ready", motor_feedback_ready_);
         register_input("/dart/button/fire", fire_button_);
         register_input("/dart/button/reload", reload_button_);
         register_input("/dart/button/reload_cancel", reload_cancel_button_);
@@ -54,14 +55,34 @@ public:
         joystick_deadzone_ = get_parameter("joystick_deadzone").as_double();
         if (has_parameter("switch_debounce_ticks"))
             switch_debounce_ticks_ = std::max(1, static_cast<int>(get_parameter("switch_debounce_ticks").as_int()));
+        // Limits are output-shaft radians relative to the first valid feedback at startup.
+        const std::array<std::string, 4> names{"left_motor", "right_motor", "yaw_motor", "distance_motor"};
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            motor_min_[i] = get_parameter(names[i] + "_position_min").as_double();
+            motor_max_[i] = get_parameter(names[i] + "_position_max").as_double();
+            if (!std::isfinite(motor_min_[i]) || !std::isfinite(motor_max_[i])
+                || motor_min_[i] > 0.0 || motor_max_[i] < 0.0)
+                throw std::runtime_error{names[i] + " position limits must be finite and contain zero"};
+        }
         set_angles(safe_angles_);
     }
 
     void update() override {
+        // Interface readiness alone does not mean a CAN feedback frame has arrived.
+        if (motor_feedback_ready_.ready() && *motor_feedback_ready_ && !motor_positions_initialized_ && trigger_angle_[0].ready() && trigger_angle_[1].ready()
+            && yaw_angle_.ready() && distance_angle_.ready()) {
+            motor_origins_ = {*trigger_angle_[0], *trigger_angle_[1], *yaw_angle_, *distance_angle_};
+            trigger_target_value_ = {motor_origins_[0], motor_origins_[1]};
+            yaw_target_value_ = motor_origins_[2];
+            distance_target_value_ = motor_origins_[3];
+            motor_positions_initialized_ = true;
+            publish_motor_targets();
+        }
         if (!switch_left_.ready() || !switch_right_.ready()) {
             set_angles(safe_angles_);
             state_ = State::kSafe;
             reset_switches();
+            hold_motor_positions();
             return;
         }
         const auto left = *switch_left_;
@@ -101,41 +122,19 @@ public:
         if (safety_locked_)
             return;
 
-        if (!trigger_initialized_ && trigger_angle_[0].ready() && trigger_angle_[1].ready()) {
-            trigger_target_value_[0] = *trigger_angle_[0];
-            trigger_target_value_[1] = *trigger_angle_[1];
-            trigger_initialized_ = true;
-        }
-        if (yaw_angle_.ready() && distance_angle_.ready() && !aim_initialized_) {
-            yaw_target_value_ = *yaw_angle_;
-            distance_target_value_ = *distance_angle_;
-            aim_initialized_ = true;
-        }
-        if (aim_initialized_) {
+        if (motor_positions_initialized_) {
             if (joystick_right_.ready()) {
-                const auto right_stick = *joystick_right_;
-                yaw_target_value_ += right_stick.x() * yaw_velocity_limit_ * 0.001;
-                distance_target_value_ += right_stick.y() * distance_velocity_limit_ * 0.001;
-                RCLCPP_INFO_THROTTLE(
-                    get_logger(), *get_clock(), 1000,
-                    "Right joystick: x=%.3f y=%.3f -> yaw_target=%.3f distance_target=%.3f",
-                    right_stick.x(), right_stick.y(), yaw_target_value_, distance_target_value_);
+                const auto& stick = *joystick_right_;
+                // Integrate joystick input into position commands at the configured 1 kHz update rate.
+                yaw_target_value_ += deadband(stick.x()) * yaw_velocity_limit_ * 0.001;
+                distance_target_value_ += deadband(stick.y()) * distance_velocity_limit_ * 0.001;
             }
-            *yaw_target_ = yaw_target_value_;
-            *distance_target_ = distance_target_value_;
-        } else if (joystick_right_.ready()) {
-            RCLCPP_WARN_THROTTLE(
-                get_logger(), *get_clock(), 1000,
-                "Right joystick is ready but motor angle feedback is not initialized; yaw_ready=%s distance_ready=%s",
-                yaw_angle_.ready() ? "yes" : "no", distance_angle_.ready() ? "yes" : "no");
-        }
-        if (trigger_initialized_ && state_ == State::kReady && joystick_left_.ready()) {
-            const auto stick_y = std::abs((*joystick_left_).y()) > joystick_deadzone_
-                ? (*joystick_left_).y() : 0.0;
-            trigger_target_value_[0] -= stick_y * trigger_adjust_sensitivity_;
-            trigger_target_value_[1] += stick_y * trigger_adjust_sensitivity_;
-            *trigger_target_[0] = trigger_target_value_[0];
-            *trigger_target_[1] = trigger_target_value_[1];
+            if (state_ == State::kReady && joystick_left_.ready()) {
+                const auto stick_y = deadband((*joystick_left_).y());
+                trigger_target_value_[0] -= stick_y * trigger_adjust_sensitivity_;
+                trigger_target_value_[1] += stick_y * trigger_adjust_sensitivity_;
+            }
+            publish_motor_targets();
         }
 
         const bool fire = fire_button_.ready() && *fire_button_;
@@ -253,20 +252,36 @@ private:
                 get_logger(), "Servo targets updated: [%.1f, %.1f, %.1f, %.1f]",
                 angles[0], angles[1], angles[2], angles[3]);
     }
-    void hold_motor_positions() {
-        if (trigger_angle_[0].ready() && trigger_angle_[1].ready()) {
-            trigger_target_value_[0] = *trigger_angle_[0];
-            trigger_target_value_[1] = *trigger_angle_[1];
-            *trigger_target_[0] = trigger_target_value_[0];
-            *trigger_target_[1] = trigger_target_value_[1];
-        }
-        if (yaw_angle_.ready() && distance_angle_.ready()) {
-            yaw_target_value_ = *yaw_angle_;
-            distance_target_value_ = *distance_angle_;
-            *yaw_target_ = yaw_target_value_;
-            *distance_target_ = distance_target_value_;
-        }
+    double deadband(double value) const {
+        return std::abs(value) > joystick_deadzone_ ? value : 0.0;
     }
+    void publish_motor_targets() {
+        // Clamp the accumulator too, so reversing the stick immediately leaves the limit.
+        trigger_target_value_[0] = limited_target(trigger_target_value_[0], 0);
+        trigger_target_value_[1] = limited_target(trigger_target_value_[1], 1);
+        yaw_target_value_ = limited_target(yaw_target_value_, 2);
+        distance_target_value_ = limited_target(distance_target_value_, 3);
+        *trigger_target_[0] = trigger_target_value_[0];
+        *trigger_target_[1] = trigger_target_value_[1];
+        *yaw_target_ = yaw_target_value_;
+        *distance_target_ = distance_target_value_;
+    }
+    double limited_target(double target, std::size_t index) const {
+        if (!std::isfinite(target))
+            target = motor_origins_[index];
+        return std::clamp(target, motor_origins_[index] + motor_min_[index],
+                          motor_origins_[index] + motor_max_[index]);
+    }
+    void hold_motor_positions() {
+        if (!motor_positions_initialized_)
+            return;
+        trigger_target_value_ = {*trigger_angle_[0], *trigger_angle_[1]};
+        yaw_target_value_ = *yaw_angle_;
+        distance_target_value_ = *distance_angle_;
+        publish_motor_targets();
+    }
+    InputInterface<bool> motor_feedback_ready_;
+    std::array<double, 4> motor_min_{}, motor_max_{}, motor_origins_{};
     InputInterface<rmcs_msgs::Switch> switch_left_, switch_right_;
     InputInterface<Eigen::Vector2d> joystick_left_, joystick_right_;
     InputInterface<bool> fire_button_, reload_button_, reload_cancel_button_;
@@ -291,8 +306,7 @@ private:
     bool safety_locked_ = true;
     bool last_fire_ = false;
     bool last_reload_ = false;
-    bool trigger_initialized_ = false;
-    bool aim_initialized_ = false;
+    bool motor_positions_initialized_ = false;
     std::array<double, 2> trigger_target_value_{};
     double yaw_target_value_ = 0.0;
     double distance_target_value_ = 0.0;
