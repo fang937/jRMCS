@@ -46,9 +46,17 @@ public:
         register_output("/dart/button/fire", fire_button_output_, false);
         register_output("/dart/button/reload", reload_button_output_, false);
         register_output("/dart/button/reload_cancel", reload_cancel_button_output_, false);
+        // 原扳机舵机 1 已改为 M2006 电机，剩余舵机保持物理编号 2/3/4。
         for (std::size_t i = 0; i < servos_.size(); ++i)
             command_component_->register_input(
-                "/dart/servo/" + std::to_string(i + 1) + "/angle", servo_angles_[i], false);
+                "/dart/servo/" + std::to_string(i + 2) + "/angle", servo_angles_[i], false);
+
+        const auto trigger_motor_id =
+            static_cast<int>(get_parameter("trigger_motor_id").as_int());
+        // IDs 1..4 are already used by the four motors in the 0x200 frame.
+        if (trigger_motor_id < 5 || trigger_motor_id > 8)
+            throw std::runtime_error{
+                "trigger_motor_id must be in [5, 8] (feedback CAN ID = 0x200 + id)"};
 
         initialize_imu_tf();
 
@@ -56,10 +64,9 @@ public:
         remote_control_ = std::make_unique<device::RemoteControl>(*this);
         remote_control_->register_dr16(&dr16_);
         auto builder = board_->start_transmit();
-        servos_[0].enable(Spec::kGpios.kPwm1);
-        servos_[1].enable(Spec::kGpios.kPwm2);
-        servos_[2].enable(Spec::kGpios.kPwm3);
-        servos_[3].enable(Spec::kGpios.kPwm4);
+        servos_[0].enable(Spec::kGpios.kPwm2);
+        servos_[1].enable(Spec::kGpios.kPwm3);
+        servos_[2].enable(Spec::kGpios.kPwm4);
         buttons_[0].enable(builder, Spec::kGpios.kPwm5);
         buttons_[1].enable(builder, Spec::kGpios.kPwm6);
         buttons_[2].enable(builder, Spec::kGpios.kPwm7);
@@ -67,9 +74,11 @@ public:
             servo.write(builder);
         RCLCPP_INFO(
             get_logger(),
-            "Dart launcher board initialized: serial='%s', initial angles=[%.1f, %.1f, %.1f, %.1f]",
-            get_parameter("board_serial").as_string().c_str(), servos_[0].angle(), servos_[1].angle(),
-            servos_[2].angle(), servos_[3].angle());
+            "Dart launcher board initialized: serial='%s', trigger_motor_id=%d (CAN 0x%03X), "
+            "initial servo angles=[%.1f, %.1f, %.1f]",
+            get_parameter("board_serial").as_string().c_str(), trigger_motor_id,
+            static_cast<unsigned>(0x200 + trigger_motor_id), servos_[0].angle(),
+            servos_[1].angle(), servos_[2].angle());
     }
 
     ~DartLauncherHardware() override { board_.reset(); }
@@ -77,12 +86,13 @@ public:
     void update() override {
         dr16_.update_status();
         remote_control_->update();
-        const bool feedback_ready = motor_feedback_mask_.load(std::memory_order_acquire) == 0x0F;
+        // 左右扳机、偏航、距离和新增扳机 M2006 都必须有真实反馈后才允许出力。
+        const bool feedback_ready = motor_feedback_mask_.load(std::memory_order_acquire) == 0x1F;
         for (auto& motor : trigger_motors_)
             motor.update_status();
+        trigger_motor_.update_status();
         yaw_motor_.update_status();
         distance_motor_.update_status();
-        // All four motors must have supplied real feedback before capturing position origins.
         *motor_feedback_ready_ = feedback_ready;
         *fire_button_output_ = buttons_[0].pressed();
         *reload_button_output_ = buttons_[1].pressed();
@@ -108,6 +118,8 @@ public:
                 received |= 1U << 2;
             if (distance_motor_.match_then_store_status(data.can_id, data.can_data))
                 received |= 1U << 3;
+            if (trigger_motor_.match_then_store_status(data.can_id, data.can_data))
+                received |= 1U << 4;
             motor_feedback_mask_.fetch_or(received, std::memory_order_release);
         }
     }
@@ -151,16 +163,21 @@ public:
                 "Servo command inputs are not ready; skipped unavailable channels");
         RCLCPP_INFO_THROTTLE(
             get_logger(), *get_clock(), 1000,
-            "Servo command transmit: ready=%s angles=[%.1f, %.1f, %.1f, %.1f] duty16=[%u, %u, %u, %u]",
+            "Servo command transmit: ready=%s angles=[%.1f, %.1f, %.1f] duty16=[%u, %u, %u]",
             all_ready ? "yes" : "no", servos_[0].angle(), servos_[1].angle(), servos_[2].angle(),
-            servos_[3].angle(), static_cast<unsigned>(servos_[0].duty16()),
-            static_cast<unsigned>(servos_[1].duty16()), static_cast<unsigned>(servos_[2].duty16()),
-            static_cast<unsigned>(servos_[3].duty16()));
+            static_cast<unsigned>(servos_[0].duty16()),
+            static_cast<unsigned>(servos_[1].duty16()),
+            static_cast<unsigned>(servos_[2].duty16()));
         // No drive current before all position feedback has been initialized.
         const auto command = [motors_ready = *motor_feedback_ready_](const device::DjiMotor& motor) {
             return motor.generate_command(motors_ready ? motor.control_torque() : 0.0);
         };
         // M3508/M2006 IDs 1..4 occupy the four slots of the same 0x200 frame.
+        // M2006 ID 5 (feedback 0x205) uses the 0x1FF frame; its command is slot 0.
+        auto trigger_packet = device::CanPacket8{
+            device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{},
+            device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{}};
+        trigger_packet.data[(trigger_motor_.id() - 1) % 4] = command(trigger_motor_).data;
         builder
             .can_transmit(Spec::kCans.kCan1, {
                 .can_id = 0x200,
@@ -168,6 +185,10 @@ public:
                     command(trigger_motors_[0]), command(trigger_motors_[1]),
                     command(yaw_motor_), command(distance_motor_)}
                                 .as_bytes(),
+            })
+            .can_transmit(Spec::kCans.kCan1, {
+                .can_id = trigger_motor_.send_id(),
+                .can_data = trigger_packet.as_bytes(),
             });
     }
 
@@ -300,15 +321,17 @@ private:
     std::optional<rmcs_msgs::BoardClock::time_point> last_sample_;
     std::atomic<unsigned> motor_feedback_mask_{0};
     OutputInterface<bool> motor_feedback_ready_;
-    std::array<device::CBoardServo, 4> servos_;
+    std::array<device::CBoardServo, 3> servos_;
     std::array<device::CBoardButton, 3> buttons_;
     device::DjiMotor trigger_motors_[2]{
         {*this, *command_component_, "/trigger/left_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM3508, 1}.set_encoder_zero_point(static_cast<int>(get_parameter("left_motor_zero_point").as_int())).enable_multi_turn_angle()},
         {*this, *command_component_, "/trigger/right_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM3508, 2}.set_encoder_zero_point(static_cast<int>(get_parameter("right_motor_zero_point").as_int())).enable_multi_turn_angle()},
     };
+    // 原扳机舵机位置改为 M2006，反馈 CAN ID 0x205，控制帧 0x1FF。
+    device::DjiMotor trigger_motor_{*this, *command_component_, "/trigger/motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, static_cast<std::uint8_t>(get_parameter("trigger_motor_id").as_int())}.set_encoder_zero_point(static_cast<int>(get_parameter("trigger_motor_zero_point").as_int())).enable_multi_turn_angle()};
     device::DjiMotor yaw_motor_{*this, *command_component_, "/yaw_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 3}.set_encoder_zero_point(static_cast<int>(get_parameter("yaw_motor_zero_point").as_int())).enable_multi_turn_angle()};
     device::DjiMotor distance_motor_{*this, *command_component_, "/distance_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 4}.set_encoder_zero_point(static_cast<int>(get_parameter("distance_motor_zero_point").as_int())).enable_multi_turn_angle()};
-    InputInterface<double> servo_angles_[4];
+    InputInterface<double> servo_angles_[3];
     OutputInterface<bool> fire_button_output_;
     OutputInterface<bool> reload_button_output_;
     OutputInterface<bool> reload_cancel_button_output_;

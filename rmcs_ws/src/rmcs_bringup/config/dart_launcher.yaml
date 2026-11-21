@@ -8,6 +8,8 @@ rmcs_executor:
       - rmcs_core::controller::pid::PidController -> dart_trigger_left_angle_pid
       - rmcs_core::controller::pid::PidController -> dart_trigger_right_velocity_pid
       - rmcs_core::controller::pid::PidController -> dart_trigger_right_angle_pid
+      - rmcs_core::controller::pid::PidController -> dart_trigger_motor_velocity_pid
+      - rmcs_core::controller::pid::PidController -> dart_trigger_motor_angle_pid
       - rmcs_core::controller::pid::PidController -> dart_yaw_velocity_pid
       - rmcs_core::controller::pid::PidController -> dart_yaw_angle_pid
       - rmcs_core::controller::pid::PidController -> dart_distance_velocity_pid
@@ -19,6 +21,10 @@ dart_launcher_hardware:
     # 编码器零点：原始刻度 0..8191；位置反馈为减速箱输出轴多圈角度（rad）。
     left_motor_zero_point: 0
     right_motor_zero_point: 0
+    # 扳机 M2006：CAN1，反馈 CAN ID = 0x200 + trigger_motor_id = 0x205
+    # 控制帧自动使用 0x1FF，ID 5 对应第一个 quarter。
+    trigger_motor_id: 5
+    trigger_motor_zero_point: 0
     yaw_motor_zero_point: 0
     distance_motor_zero_point: 0
 
@@ -38,19 +44,28 @@ dart_launcher_hardware:
 dart_launcher_controller:
   ros__parameters:
     switch_debounce_ticks: 20
-    # Each angle array maps to servo 1/2/3/4.
-    fire_angles: [60.0, 90.0, 90.0, 90.0]
-    safe_angles: [130.0, 90.0, 0.0, 0.0]
-    fire_return_angles: [130.0, 90.0, 90.0, 0.0]
-    reload1_angles: [0.0, 180.0, 90.0, 90.0]
-    reload2_angles: [0.0, 180.0, 90.0, 90.0]
-    reload3_angles: [0.0, 180.0, 90.0, 90.0]
-    reload1_return_angles: [0.0, 90.0, 180.0, 0.0]
-    reload2_return_angles: [0.0, 90.0, 180.0, 0.0]
-    reload3_return_angles: [0.0, 90.0, 180.0, 0.0]
+    # 原扳机舵机 1 已改为 M2006 电机；以下数组只对应剩下的舵机 2/3/4。
+    fire_angles: [90.0, 90.0, 90.0]
+    safe_angles: [90.0, 0.0, 0.0]
+    fire_return_angles: [90.0, 90.0, 0.0]
+    reload1_angles: [180.0, 90.0, 90.0]
+    reload2_angles: [180.0, 90.0, 90.0]
+    reload3_angles: [180.0, 90.0, 90.0]
+    reload1_return_angles: [90.0, 180.0, 0.0]
+    reload2_return_angles: [90.0, 180.0, 0.0]
+    reload3_return_angles: [90.0, 180.0, 0.0]
     # At 1000 Hz, 2000 ticks hold the action for 2 seconds before return.
     fire_hold_ticks: 2000
-    # 四台 DJI 电机统一为位置外环 -> 速度内环 -> 力矩输出，摇杆只修改位置目标。
+    # 扳机 M2006 位置目标：target = 启动原点 + turns * 360° + angle_deg。
+    # 例如 1.5 圈可写成 turns: 1.5, angle_deg: 0；也可写成 turns: 1.0, angle_deg: 180。
+    trigger_fire_turns: 0.5
+    trigger_fire_angle_deg: 0.0
+    trigger_return_turns: 0.0
+    trigger_return_angle_deg: 0.0
+    # 扳机软件限位：相对启动原点，单位“圈”，必须 min <= 0 <= max。
+    trigger_motor_position_min_turns: 0.0
+    trigger_motor_position_max_turns: 1.0
+    # 其余 DJI 电机统一为位置外环 -> 速度内环 -> 力矩输出，右摇杆只修改位置目标。
     # 软件限位：相对本次启动首次有效反馈位置的输出轴角度，单位 rad。
     # TODO(机械标定)：分别填写实际下/上限；必须 min <= 0 <= max。
     # 默认 [0, 0] 锁定启动位置；未标定前不允许摇杆移动。重启将重新取原点，并非绝对机械限位。
@@ -65,6 +80,7 @@ dart_launcher_controller:
     # 位置目标变化速率上限（rad/s），不是切换到速度控制模式。
     yaw_motor_velocity_limit: 10.0
     distance_motor_velocity_limit: 10.0
+    # 左拨杆每 tick 修改扳机 M2006 目标的角度（rad）；负值可反向。
     trigger_adjust_sensitivity: 0.004
     joystick_deadzone: 0.08
     reload1_interval_ticks: 2000
@@ -116,6 +132,29 @@ dart_trigger_right_angle_pid:
     kd: 0.0
     output_max: 80.0
     output_min: -80.0
+
+# 扳机 M2006 位置环：角度环输出速度目标，速度环输出力矩。
+dart_trigger_motor_velocity_pid:
+  ros__parameters:
+    measurement: /trigger/motor/velocity
+    setpoint: /trigger/motor/control_velocity
+    control: /trigger/motor/control_torque
+    kp: 0.04
+    ki: 0.0
+    kd: 0.0
+    output_max: 0.4
+    output_min: -0.4
+
+dart_trigger_motor_angle_pid:
+  ros__parameters:
+    measurement: /trigger/motor/angle
+    setpoint: /trigger/motor/control_angle
+    control: /trigger/motor/control_velocity
+    kp: 10.0
+    ki: 0.0
+    kd: 0.0
+    output_max: 20.0
+    output_min: -20.0
 
 dart_yaw_velocity_pid:
   ros__parameters:
