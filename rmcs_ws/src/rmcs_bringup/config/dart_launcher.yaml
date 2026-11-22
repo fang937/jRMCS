@@ -54,34 +54,31 @@ dart_launcher_controller:
     reload1_return_angles: [90.0, 180.0, 0.0]
     reload2_return_angles: [90.0, 180.0, 0.0]
     reload3_return_angles: [90.0, 180.0, 0.0]
-    # At 1000 Hz, 2000 ticks hold the action for 2 seconds before return.
-    fire_hold_ticks: 2000
-    # 扳机 M2006 位置目标：target = 启动原点 + turns * 360° + angle_deg。
-    # 例如 1.5 圈可写成 turns: 1.5, angle_deg: 0；也可写成 turns: 1.0, angle_deg: 180。
-    trigger_fire_turns: 0.5
-    trigger_fire_angle_deg: 0.0
-    trigger_return_turns: 0.0
-    trigger_return_angle_deg: 0.0
-    # 扳机软件限位：相对启动原点，单位“圈”，必须 min <= 0 <= max。
-    trigger_motor_position_min_turns: 0.0
-    trigger_motor_position_max_turns: 1.0
-    # 其余 DJI 电机统一为位置外环 -> 速度内环 -> 力矩输出，右摇杆只修改位置目标。
-    # 软件限位：相对本次启动首次有效反馈位置的输出轴角度，单位 rad。
-    # TODO(机械标定)：分别填写实际下/上限；必须 min <= 0 <= max。
-    # 默认 [0, 0] 锁定启动位置；未标定前不允许摇杆移动。重启将重新取原点，并非绝对机械限位。
-    left_motor_position_min: 0.0      # 左扳机负方向行程（按实际机构标定）
-    left_motor_position_max: 0.0      # 左扳机正方向行程
-    right_motor_position_min: 0.0     # 右扳机负方向行程；与左侧旋向相反，独立标定
-    right_motor_position_max: 0.0     # 右扳机正方向行程
-    yaw_motor_position_min: 0.0       # 偏航负方向行程
-    yaw_motor_position_max: 0.0       # 偏航正方向行程
-    distance_motor_position_min: 0.0  # 距离机构负方向行程
-    distance_motor_position_max: 0.0  # 距离机构正方向行程
+    # 左开关上/中/下分别选择预备、扳机接触、发射位置；单位为减速箱输出轴度，相对启动原点。
+    trigger_pre_fire_angle_deg: -15.0
+    trigger_contact_angle_deg: 5.0
+    # 当前发射角为 -50°；三个位置可独立修改。
+    trigger_fire_angle_deg: -50.0
+    # 软件限位：相对启动原点的减速箱输出轴角度，必须 min <= 0 <= max。
+    trigger_motor_position_min_deg: -57.6
+    trigger_motor_position_max_deg: 360.0
+    # 左开关每档到目标位置的斜坡速度（减速箱输出轴 rad/s），可分别调节。
+    trigger_pre_fire_velocity_limit: 1.0
+    trigger_contact_velocity_limit: 1.0
+    trigger_fire_velocity_limit: 15.0
+    left_motor_position_min: -10000.0      # 左扳机负方向行程（按实际机构标定）
+    left_motor_position_max: 10000.0      # 左扳机正方向行程
+    right_motor_position_min: -10000.0     # 右扳机负方向行程；与左侧旋向相反，独立标定
+    right_motor_position_max: 10000.0     # 右扳机正方向行程
+    yaw_motor_position_min: -314.0      # 偏航负方向行程，待机械标定
+    yaw_motor_position_max: 314.0       # 偏航正方向行程，待机械标定
+    distance_motor_position_min: -314.0 # 距离机构负方向行程，待机械标定
+    distance_motor_position_max: 314.0  # 距离机构正方向行程，待机械标定
     # 位置目标变化速率上限（rad/s），不是切换到速度控制模式。
-    yaw_motor_velocity_limit: 10.0
-    distance_motor_velocity_limit: 10.0
-    # 左拨杆每 tick 修改扳机 M2006 目标的角度（rad）；负值可反向。
-    trigger_adjust_sensitivity: 0.004
+    yaw_motor_velocity_limit: 20.0
+    distance_motor_velocity_limit: 20.0
+    # 左摇杆 Y 轴每 tick 调整两台 M3508 扳机间距目标（rad）；负值可反向。
+    trigger_adjust_sensitivity: 0.01
     joystick_deadzone: 0.08
     reload1_interval_ticks: 2000
     reload2_interval_ticks: 2000
@@ -94,18 +91,18 @@ dart_trigger_left_velocity_pid:
     measurement: /trigger/left_motor/velocity
     setpoint: /trigger/left_motor/control_velocity
     control: /trigger/left_motor/control_torque
-    kp: 0.04
+    kp: 0.08
     ki: 0.0
     kd: 0.0
-    output_max: 0.4
-    output_min: -0.4
+    output_max: 2.0
+    output_min: -2.0
 
 dart_trigger_left_angle_pid:
   ros__parameters:
     measurement: /trigger/left_motor/angle
     setpoint: /trigger/left_motor/control_angle
     control: /trigger/left_motor/control_velocity
-    kp: 10.0
+    kp: 20.0
     ki: 0.0
     kd: 0.0
     output_max: 80.0
@@ -116,86 +113,93 @@ dart_trigger_right_velocity_pid:
     measurement: /trigger/right_motor/velocity
     setpoint: /trigger/right_motor/control_velocity
     control: /trigger/right_motor/control_torque
-    kp: 0.04
+    kp: 0.08
     ki: 0.0
     kd: 0.0
-    output_max: 0.4
-    output_min: -0.4
+    output_max: 2.0
+    output_min: -2.0
 
 dart_trigger_right_angle_pid:
   ros__parameters:
     measurement: /trigger/right_motor/angle
     setpoint: /trigger/right_motor/control_angle
     control: /trigger/right_motor/control_velocity
-    kp: 10.0
+    kp: 20.0
     ki: 0.0
     kd: 0.0
     output_max: 80.0
     output_min: -80.0
 
 # 扳机 M2006 位置环：角度环输出速度目标，速度环输出力矩。
+# M2006（36:1）输出轴最大力矩约 1.8 N*m，generate_command 会按该值限幅。
+# 速度环输出保持 1.8 N*m 以保留最大转动力矩；保留小力矩输出以抵抗外力、锁住扳机位置。
 dart_trigger_motor_velocity_pid:
   ros__parameters:
     measurement: /trigger/motor/velocity
     setpoint: /trigger/motor/control_velocity
     control: /trigger/motor/control_torque
-    kp: 0.04
+    kp: 0.8
     ki: 0.0
     kd: 0.0
-    output_max: 0.4
-    output_min: -0.4
+    output_max: 1.8
+    output_min: -1.8
 
+# 角度环输出限幅 4.0 rad/s；保留小幅速度修正，使位置误差可传递到速度环形成保持力矩。
 dart_trigger_motor_angle_pid:
   ros__parameters:
     measurement: /trigger/motor/angle
     setpoint: /trigger/motor/control_angle
     control: /trigger/motor/control_velocity
-    kp: 10.0
+    kp: 12.0
     ki: 0.0
     kd: 0.0
-    output_max: 20.0
-    output_min: -20.0
+    output_max: 4.0
+    output_min: -4.0
 
+# yaw/distance 也是 M2006，最大输出约 1.8 N*m。
+# 速度环 kp 0.02->0.3、力矩上限 0.2->1.2 N*m，提高加速度和跟随能力；
+# 如果出现高频抖动，先把 output_max 降到 0.8 或 kp 降到 0.2。
 dart_yaw_velocity_pid:
   ros__parameters:
     measurement: /yaw_motor/velocity
     setpoint: /yaw_motor/control_velocity
     control: /yaw_motor/control_torque
-    kp: 0.02
+    kp: 0.3
     ki: 0.0
     kd: 0.0
-    output_max: 0.2
-    output_min: -0.2
+    output_max: 1.2
+    output_min: -1.2
 
+# 角度环输出限幅 20 rad/s，提高右摇杆目标变化时的跟随速度。
 dart_yaw_angle_pid:
   ros__parameters:
     measurement: /yaw_motor/angle
     setpoint: /yaw_motor/control_angle
     control: /yaw_motor/control_velocity
-    kp: 5.0
+    kp: 20.0
     ki: 0.0
     kd: 0.0
-    output_max: 10.0
-    output_min: -10.0
+    output_max: 20.0
+    output_min: -20.0
 
 dart_distance_velocity_pid:
   ros__parameters:
     measurement: /distance_motor/velocity
     setpoint: /distance_motor/control_velocity
     control: /distance_motor/control_torque
-    kp: 0.02
+    kp: 0.3
     ki: 0.0
     kd: 0.0
-    output_max: 0.2
-    output_min: -0.2
+    output_max: 1.2
+    output_min: -1.2
 
 dart_distance_angle_pid:
   ros__parameters:
     measurement: /distance_motor/angle
     setpoint: /distance_motor/control_angle
     control: /distance_motor/control_velocity
-    kp: 5.0
+    kp: 20.0
     ki: 0.0
     kd: 0.0
-    output_max: 10.0
-    output_min: -10.0
+    output_max: 20.0
+    output_min: -20.0

@@ -43,6 +43,12 @@ public:
         , dynamic_tf_{this}
         , static_tf_{this} {
         register_output("/dart/motors/feedback_ready", motor_feedback_ready_, false);
+        register_output("/yaw_motor/feedback_ready", yaw_motor_feedback_ready_, false);
+        register_output("/distance_motor/feedback_ready", distance_motor_feedback_ready_, false);
+        register_output("/dart/trigger_pair/feedback_ready", trigger_pair_feedback_ready_, false);
+        // 扳机 M2006 单独的就绪标志：原点必须等它自己的反馈到达后再取。
+        register_output("/trigger/motor/feedback_ready", trigger_motor_feedback_ready_, false);
+        register_output("/trigger/motor/encoder_raw", trigger_motor_encoder_raw_, 0);
         register_output("/dart/button/fire", fire_button_output_, false);
         register_output("/dart/button/reload", reload_button_output_, false);
         register_output("/dart/button/reload_cancel", reload_cancel_button_output_, false);
@@ -86,14 +92,21 @@ public:
     void update() override {
         dr16_.update_status();
         remote_control_->update();
-        // 左右扳机、偏航、距离和新增扳机 M2006 都必须有真实反馈后才允许出力。
-        const bool feedback_ready = motor_feedback_mask_.load(std::memory_order_acquire) == 0x1F;
+        // Each motor is enabled independently once its own feedback is observed.
+        const auto feedback_mask = motor_feedback_mask_.load(std::memory_order_acquire);
+        const bool feedback_ready = (feedback_mask & 0x0FU) == 0x0FU;
         for (auto& motor : trigger_motors_)
             motor.update_status();
         trigger_motor_.update_status();
         yaw_motor_.update_status();
         distance_motor_.update_status();
         *motor_feedback_ready_ = feedback_ready;
+        *yaw_motor_feedback_ready_ = (feedback_mask & (1U << 2)) != 0;
+        *distance_motor_feedback_ready_ = (feedback_mask & (1U << 3)) != 0;
+        *trigger_pair_feedback_ready_ = (feedback_mask & 0x03U) == 0x03U;
+        // 此时 trigger_motor_ 至少已用一帧反馈更新过角度，控制器可以安全取原点。
+        *trigger_motor_feedback_ready_ = (feedback_mask & (1U << 4)) != 0;
+        *trigger_motor_encoder_raw_ = trigger_motor_.last_raw_angle();
         *fire_button_output_ = buttons_[0].pressed();
         *reload_button_output_ = buttons_[1].pressed();
         *reload_cancel_button_output_ = buttons_[2].pressed();
@@ -149,47 +162,49 @@ public:
 
     void command_update() {
         auto builder = board_->start_transmit();
-        bool all_ready = true;
-        for (std::size_t i = 0; i < servos_.size(); ++i) {
-            if (!servo_angles_[i].ready()) {
-                all_ready = false;
-                continue;
+        const auto feedback_mask = motor_feedback_mask_.load(std::memory_order_acquire);
+        // PWM servos only need a 50 Hz refresh. Keep CAN motor commands at the
+        // executor rate without generating a USB GPIO write on every 1 ms tick.
+        const bool update_servos = servo_update_ticks_++ % kServoUpdateDivider == 0;
+        if (update_servos) {
+            bool all_ready = true;
+            for (std::size_t i = 0; i < servos_.size(); ++i) {
+                if (!servo_angles_[i].ready()) {
+                    all_ready = false;
+                    continue;
+                }
+                servos_[i].set_angle(builder, *servo_angles_[i]);
             }
-            servos_[i].set_angle(builder, *servo_angles_[i]);
+            if (!all_ready)
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 1000,
+                    "Servo command inputs are not ready; skipped unavailable channels");
         }
-        if (!all_ready)
-            RCLCPP_WARN_THROTTLE(
-                get_logger(), *get_clock(), 1000,
-                "Servo command inputs are not ready; skipped unavailable channels");
-        RCLCPP_INFO_THROTTLE(
-            get_logger(), *get_clock(), 1000,
-            "Servo command transmit: ready=%s angles=[%.1f, %.1f, %.1f] duty16=[%u, %u, %u]",
-            all_ready ? "yes" : "no", servos_[0].angle(), servos_[1].angle(), servos_[2].angle(),
-            static_cast<unsigned>(servos_[0].duty16()),
-            static_cast<unsigned>(servos_[1].duty16()),
-            static_cast<unsigned>(servos_[2].duty16()));
-        // No drive current before all position feedback has been initialized.
-        const auto command = [motors_ready = *motor_feedback_ready_](const device::DjiMotor& motor) {
-            return motor.generate_command(motors_ready ? motor.control_torque() : 0.0);
+        const auto command = [](const device::DjiMotor& motor, bool ready) {
+            return motor.generate_command(ready ? motor.control_torque() : 0.0);
         };
-        // M3508/M2006 IDs 1..4 occupy the four slots of the same 0x200 frame.
-        // M2006 ID 5 (feedback 0x205) uses the 0x1FF frame; its command is slot 0.
-        auto trigger_packet = device::CanPacket8{
-            device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{},
-            device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{}};
-        trigger_packet.data[(trigger_motor_.id() - 1) % 4] = command(trigger_motor_).data;
+        // Each motor is gated by its own feedback bit. A missing motor receives
+        // zero current while other motors remain independently controllable.
         builder
             .can_transmit(Spec::kCans.kCan1, {
                 .can_id = 0x200,
                 .can_data = device::CanPacket8{
-                    command(trigger_motors_[0]), command(trigger_motors_[1]),
-                    command(yaw_motor_), command(distance_motor_)}
+                    command(trigger_motors_[0], feedback_mask & (1U << 0)),
+                    command(trigger_motors_[1], feedback_mask & (1U << 1)),
+                    command(yaw_motor_, feedback_mask & (1U << 2)),
+                    command(distance_motor_, feedback_mask & (1U << 3))}
                                 .as_bytes(),
-            })
-            .can_transmit(Spec::kCans.kCan1, {
-                .can_id = trigger_motor_.send_id(),
-                .can_data = trigger_packet.as_bytes(),
             });
+        // M2006 ID 5 (feedback 0x205) uses the 0x1FF frame; its command is slot 0.
+        auto trigger_packet = device::CanPacket8{
+            device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{},
+            device::CanPacket8::PaddingQuarter{}, device::CanPacket8::PaddingQuarter{}};
+        trigger_packet.data[(trigger_motor_.id() - 1) % 4] =
+            command(trigger_motor_, feedback_mask & (1U << 4)).data;
+        builder.can_transmit(Spec::kCans.kCan1, {
+            .can_id = trigger_motor_.send_id(),
+            .can_data = trigger_packet.as_bytes(),
+        });
     }
 
 private:
@@ -321,6 +336,10 @@ private:
     std::optional<rmcs_msgs::BoardClock::time_point> last_sample_;
     std::atomic<unsigned> motor_feedback_mask_{0};
     OutputInterface<bool> motor_feedback_ready_;
+    OutputInterface<bool> yaw_motor_feedback_ready_, distance_motor_feedback_ready_;
+    OutputInterface<bool> trigger_pair_feedback_ready_;
+    OutputInterface<bool> trigger_motor_feedback_ready_;
+    OutputInterface<int> trigger_motor_encoder_raw_;
     std::array<device::CBoardServo, 3> servos_;
     std::array<device::CBoardButton, 3> buttons_;
     device::DjiMotor trigger_motors_[2]{
@@ -332,6 +351,8 @@ private:
     device::DjiMotor yaw_motor_{*this, *command_component_, "/yaw_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 3}.set_encoder_zero_point(static_cast<int>(get_parameter("yaw_motor_zero_point").as_int())).enable_multi_turn_angle()};
     device::DjiMotor distance_motor_{*this, *command_component_, "/distance_motor", device::DjiMotor::Config{device::DjiMotor::Type::kM2006, 4}.set_encoder_zero_point(static_cast<int>(get_parameter("distance_motor_zero_point").as_int())).enable_multi_turn_angle()};
     InputInterface<double> servo_angles_[3];
+    static constexpr std::uint32_t kServoUpdateDivider = 20;
+    std::uint32_t servo_update_ticks_ = 0;
     OutputInterface<bool> fire_button_output_;
     OutputInterface<bool> reload_button_output_;
     OutputInterface<bool> reload_cancel_button_output_;
