@@ -1,7 +1,6 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -26,31 +25,27 @@ public:
         register_input("/yaw_motor/feedback_ready", yaw_motor_feedback_ready_);
         register_input("/distance_motor/feedback_ready", distance_motor_feedback_ready_);
         register_input("/dart/trigger_pair/feedback_ready", trigger_pair_feedback_ready_);
-        register_input("/trigger/motor/feedback_ready", trigger_motor_feedback_ready_);
-        register_input("/trigger/motor/velocity", trigger_motor_velocity_);
-        register_input("/trigger/motor/encoder_raw", trigger_motor_encoder_raw_);
         register_input("/dart/button/fire", fire_button_);
         register_input("/dart/button/reload", reload_button_);
         register_input("/dart/button/reload_cancel", reload_cancel_button_);
-        // 原扳机舵机 1 已改为 M2006，剩余舵机保持物理编号 2/3/4。
         for (std::size_t i = 0; i < servo_angles_.size(); ++i)
             register_output(
-                "/dart/servo/" + std::to_string(i + 2) + "/angle", servo_angles_[i], 90.0);
+                "/dart/servo/" + std::to_string(i + 1) + "/angle", servo_angles_[i], 90.0);
         register_input("/trigger/left_motor/angle", trigger_angle_[0]);
         register_input("/trigger/right_motor/angle", trigger_angle_[1]);
-        register_input("/trigger/motor/angle", trigger_motor_angle_);
         register_input("/yaw_motor/angle", yaw_angle_);
         register_input("/distance_motor/angle", distance_angle_);
         register_input("/yaw_motor/velocity", yaw_velocity_);
         register_input("/distance_motor/velocity", distance_velocity_);
         register_output("/trigger/left_motor/control_angle", trigger_target_[0]);
         register_output("/trigger/right_motor/control_angle", trigger_target_[1]);
-        register_output("/trigger/motor/control_angle", trigger_motor_target_);
         register_output("/yaw_motor/control_angle", yaw_target_);
         register_output("/distance_motor/control_angle", distance_target_);
 
-        fire_angles_ = read_angles("fire_angles", {90.0, 90.0, 90.0});
-        safe_angles_ = read_angles("safe_angles", {90.0, 90.0, 90.0});
+        fire_angles_ = read_angles("fire_angles", {90.0, 90.0, 90.0, 90.0});
+        safe_angles_ = read_angles("safe_angles", {90.0, 90.0, 90.0, 90.0});
+        pre_fire_angles_ = read_angles("pre_fire_angles", safe_angles_);
+        contact_angles_ = read_angles("contact_angles", pre_fire_angles_);
         fire_return_angles_ = read_angles("fire_return_angles", safe_angles_);
         reload_angles_[0] = read_angles("reload1_angles", safe_angles_);
         reload_angles_[1] = read_angles("reload2_angles", safe_angles_);
@@ -67,26 +62,6 @@ public:
         joystick_deadzone_ = double_parameter("joystick_deadzone");
         if (has_parameter("switch_debounce_ticks"))
             switch_debounce_ticks_ = std::max(1, static_cast<int>(get_parameter("switch_debounce_ticks").as_int()));
-
-        // 三档位置和软件限位都使用减速箱输出轴角度，单位为度，相对启动原点。
-        trigger_fire_position_ = read_trigger_position("trigger_fire");
-        trigger_pre_fire_position_ = read_trigger_position("trigger_pre_fire");
-        trigger_contact_position_ = read_trigger_position("trigger_contact");
-        trigger_min_angle_deg_ = double_parameter("trigger_motor_position_min_deg");
-        trigger_max_angle_deg_ = double_parameter("trigger_motor_position_max_deg");
-        if (!std::isfinite(trigger_min_angle_deg_) || !std::isfinite(trigger_max_angle_deg_)
-            || trigger_min_angle_deg_ > 0.0 || trigger_max_angle_deg_ < 0.0)
-            throw std::runtime_error{
-                "trigger_motor_position_min_deg/max_deg must be finite and contain zero"};
-        // 位置目标斜坡速度：把阶跃目标拆成每 tick 的小步，避免满力矩撞击机械限位。
-        trigger_pre_fire_velocity_limit_ = double_parameter("trigger_pre_fire_velocity_limit");
-        trigger_contact_velocity_limit_ = double_parameter("trigger_contact_velocity_limit");
-        trigger_fire_velocity_limit_ = double_parameter("trigger_fire_velocity_limit");
-        for (const auto velocity : {trigger_pre_fire_velocity_limit_, trigger_contact_velocity_limit_,
-                                    trigger_fire_velocity_limit_})
-            if (!std::isfinite(velocity) || velocity <= 0.0)
-                throw std::runtime_error{"trigger position velocity limits must be positive"};
-
         // Limits are output-shaft radians relative to the first valid feedback at startup.
         const std::array<std::string, 4> names{"left_motor", "right_motor", "yaw_motor", "distance_motor"};
         for (std::size_t i = 0; i < names.size(); ++i) {
@@ -100,64 +75,6 @@ public:
     }
 
     void update() override {
-        std::string action_name;
-        if (state_ == State::kFiring) {
-            action_name = "FIRING";
-        } else if (state_ == State::kReloading) {
-            action_name = "RELOADING (stage " + std::to_string(reload_stage_ + 1) + "/3)";
-        } else {
-            action_name = "IDLE";
-        }
-        const char* position_state = "UNKNOWN";
-        if (left_switch_.stable == rmcs_msgs::Switch::UP)
-            position_state = "PRE_FIRE";
-        else if (left_switch_.stable == rmcs_msgs::Switch::MIDDLE)
-            position_state = "CONTACT";
-        else if (left_switch_.stable == rmcs_msgs::Switch::DOWN)
-            position_state = "FIRE";
-        const double nan = std::nan("");
-        const double actual_angle_deg = trigger_position_initialized_ && trigger_motor_angle_.ready()
-            ? (*trigger_motor_angle_ - trigger_motor_origin_) * 180.0 / std::numbers::pi
-            : nan;
-        const double ramp_target_deg = trigger_position_initialized_
-            ? (trigger_motor_target_value_ - trigger_motor_origin_) * 180.0 / std::numbers::pi
-            : nan;
-        const double selected_angle_deg = trigger_position_initialized_
-            ? (trigger_motor_command_value_ - trigger_motor_origin_) * 180.0 / std::numbers::pi
-            : nan;
-        const double motor_speed_deg_s = trigger_motor_velocity_.ready()
-            ? *trigger_motor_velocity_ * 180.0 / std::numbers::pi
-            : nan;
-        const double slew_limit_deg_s = current_trigger_velocity_limit() * 180.0 / std::numbers::pi;
-        RCLCPP_INFO_THROTTLE(
-            get_logger(), *get_clock(), 20,
-            "Trigger state=%s action=%s encoder=%d/8191 angle=%.2f deg ramp_target=%.2f deg selected=%.2f deg motor_speed=%.2f deg/s target_slew=%.2f deg/s (limit %.2f deg/s)",
-            position_state, action_name.c_str(),
-            trigger_motor_encoder_raw_.ready() ? *trigger_motor_encoder_raw_ : -1, actual_angle_deg, ramp_target_deg,
-            selected_angle_deg, motor_speed_deg_s, trigger_motor_target_slew_deg_s_,
-            slew_limit_deg_s);
-        const double yaw_angle_deg = yaw_position_initialized_ && yaw_angle_.ready()
-            ? (*yaw_angle_ - motor_origins_[2]) * 180.0 / std::numbers::pi
-            : nan;
-        const double distance_angle_deg = distance_position_initialized_ && distance_angle_.ready()
-            ? (*distance_angle_ - motor_origins_[3]) * 180.0 / std::numbers::pi
-            : nan;
-        const double right_x = joystick_right_.ready() ? (*joystick_right_).x() : nan;
-        const double right_y = joystick_right_.ready() ? (*joystick_right_).y() : nan;
-        RCLCPP_INFO_THROTTLE(
-            get_logger(), *get_clock(), 20,
-            "Motor 203 yaw: stick_x=%.2f angle=%.2f deg target=%.2f deg speed=%.2f deg/s | "
-            "Motor 204 distance: stick_y=%.2f angle=%.2f deg target=%.2f deg speed=%.2f deg/s | safety_locked=%s",
-            right_x, yaw_angle_deg,
-            yaw_position_initialized_
-                ? (yaw_target_value_ - motor_origins_[2]) * 180.0 / std::numbers::pi : nan,
-            yaw_velocity_.ready() ? *yaw_velocity_ * 180.0 / std::numbers::pi : nan,
-            right_y, distance_angle_deg,
-            distance_position_initialized_
-                ? (distance_target_value_ - motor_origins_[3]) * 180.0 / std::numbers::pi : nan,
-            distance_velocity_.ready() ? *distance_velocity_ * 180.0 / std::numbers::pi : nan,
-            safety_locked_ ? "yes" : "no");
-
         // 初始化前让输出目标跟随实测角度。输出接口默认值是 0，如果此时电机反馈已经
         // 是非零角度，直接按 0 目标闭环会把扳机上电就拉向零位（表现为上电抖动）。
         if (trigger_pair_feedback_ready_.ready() && *trigger_pair_feedback_ready_
@@ -179,17 +96,6 @@ public:
             distance_target_value_ = motor_origins_[3];
             distance_position_initialized_ = true;
         }
-        if (trigger_motor_feedback_ready_.ready() && *trigger_motor_feedback_ready_
-            && trigger_motor_angle_.ready() && !trigger_position_initialized_) {
-            trigger_motor_origin_ = *trigger_motor_angle_;
-            trigger_motor_command_value_ = trigger_motor_origin_;
-            trigger_motor_target_value_ = trigger_motor_origin_;
-            trigger_motor_min_ =
-                trigger_motor_origin_ + trigger_min_angle_deg_ * std::numbers::pi / 180.0;
-            trigger_motor_max_ =
-                trigger_motor_origin_ + trigger_max_angle_deg_ * std::numbers::pi / 180.0;
-            trigger_position_initialized_ = true;
-        }
         if (joystick_right_.ready()) {
             const auto& stick = *joystick_right_;
             if (yaw_position_initialized_)
@@ -202,14 +108,21 @@ public:
             trigger_target_value_[0] -= stick_y * trigger_adjust_sensitivity_;
             trigger_target_value_[1] += stick_y * trigger_adjust_sensitivity_;
         }
-        if (yaw_position_initialized_ || distance_position_initialized_ || trigger_pair_initialized_
-            || trigger_position_initialized_)
+        if (yaw_position_initialized_ || distance_position_initialized_ || trigger_pair_initialized_)
             publish_motor_targets();
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Trigger pair initialized=%s left_stick_y=%.3f; "
+            "angle left=%.3f right=%.3f target left=%.3f right=%.3f rad",
+            trigger_pair_initialized_ ? "yes" : "no",
+            joystick_left_.ready() ? (*joystick_left_).y() : 0.0,
+            trigger_angle_[0].ready() ? *trigger_angle_[0] : 0.0,
+            trigger_angle_[1].ready() ? *trigger_angle_[1] : 0.0,
+            trigger_target_value_[0], trigger_target_value_[1]);
         if (!switch_left_.ready() || !switch_right_.ready()) {
             set_angles(safe_angles_);
             state_ = State::kSafe;
             reset_switches();
-            hold_motor_positions();
             return;
         }
         const auto left = *switch_left_;
@@ -220,7 +133,6 @@ public:
             reset_switches();
             ticks_ = 0;
             set_angles(safe_angles_);
-            hold_motor_positions();
             last_fire_ = fire_button_.ready() && *fire_button_;
             last_reload_ = reload_button_.ready() && *reload_button_;
             return;
@@ -231,6 +143,7 @@ public:
             right_switch_ = {right, right, 0};
             switches_initialized_ = true;
         }
+        const auto previous_left = left_switch_.stable;
         const auto previous_right = right_switch_.stable;
         update_switch(left, left_switch_);
         update_switch(right, right_switch_);
@@ -246,20 +159,14 @@ public:
         if (safety_locked_)
             return;
 
-        if (trigger_position_initialized_ && left_switch_.stable != rmcs_msgs::Switch::UNKNOWN) {
-            if (left_switch_.stable == rmcs_msgs::Switch::UP) {
-                trigger_fire_position_selected_ = false;
-                trigger_contact_position_selected_ = false;
-                set_trigger_target(trigger_pre_fire_position_);
-            } else if (left_switch_.stable == rmcs_msgs::Switch::DOWN) {
-                trigger_fire_position_selected_ = true;
-                trigger_contact_position_selected_ = false;
-                set_trigger_target(trigger_fire_position_);
-            } else {
-                trigger_fire_position_selected_ = false;
-                trigger_contact_position_selected_ = true;
-                set_trigger_target(trigger_contact_position_);
-            }
+        if (state_ == State::kSafe || previous_left != left_switch_.stable) {
+            state_ = State::kReady;
+            if (left_switch_.stable == rmcs_msgs::Switch::UP)
+                set_angles(pre_fire_angles_);
+            else if (left_switch_.stable == rmcs_msgs::Switch::DOWN)
+                set_angles(fire_angles_);
+            else
+                set_angles(contact_angles_);
         }
 
         const bool fire = fire_button_.ready() && *fire_button_;
@@ -288,7 +195,7 @@ public:
         case State::kReady:
             state_ = State::kReady;
             if (fire_edge && right != rmcs_msgs::Switch::DOWN) {
-                RCLCPP_INFO(get_logger(), "FIRE requested: left switch MIDDLE or fire button");
+                RCLCPP_INFO(get_logger(), "FIRE requested: fire button");
                 state_ = State::kFiring;
                 set_angles(fire_angles_);
             } else if (reload_edge && left != rmcs_msgs::Switch::DOWN) {
@@ -317,9 +224,6 @@ public:
     }
 
 private:
-    struct TriggerPosition {
-        double angle_deg = 0.0;
-    };
     struct SwitchState {
         rmcs_msgs::Switch candidate = rmcs_msgs::Switch::UNKNOWN;
         rmcs_msgs::Switch stable = rmcs_msgs::Switch::UNKNOWN;
@@ -341,36 +245,33 @@ private:
         if (state.ticks >= switch_debounce_ticks_)
             state.stable = state.candidate;
     }
-    std::array<double, 3> current_angles() const {
-        std::array<double, 3> angles{};
+    std::array<double, 4> current_angles() const {
+        std::array<double, 4> angles{};
         for (std::size_t i = 0; i < angles.size(); ++i)
             angles[i] = last_servo_angles_[i].value_or(safe_angles_[i]);
         return angles;
     }
-    void apply_reload_angles(const std::array<double, 3>& targets) {
+    void apply_reload_angles(const std::array<double, 4>& targets) {
         auto angles = current_angles();
         angles[0] = targets[0];
         angles[1] = targets[1];
+        angles[2] = targets[2];
         if (reload_stage_ > 0)
-            angles[2] = targets[2];
+            angles[3] = targets[3];
         set_angles(angles);
     }
     enum class State { kSafe, kReady, kFiring, kReloading };
-    std::array<double, 3> read_angles(const char* name, std::array<double, 3> fallback) {
+    std::array<double, 4> read_angles(const char* name, std::array<double, 4> fallback) {
         if (!has_parameter(name))
             return fallback;
         const auto values = get_parameter(name).as_double_array();
         if (values.size() != fallback.size())
-            throw std::runtime_error{std::string{name} + " must contain three angles"};
+            throw std::runtime_error{std::string{name} + " must contain four angles"};
+        for (const auto angle : values)
+            if (!std::isfinite(angle) || angle < 0.0 || angle > 180.0)
+                throw std::runtime_error{std::string{name} + " angles must be finite and in [0, 180]"};
         std::copy(values.begin(), values.end(), fallback.begin());
         return fallback;
-    }
-    TriggerPosition read_trigger_position(const std::string& prefix) {
-        TriggerPosition position;
-        position.angle_deg = double_parameter(prefix + "_angle_deg");
-        if (!std::isfinite(position.angle_deg))
-            throw std::runtime_error{prefix + " position must be finite"};
-        return position;
     }
     // YAML 里写成 0、1、-314 会被解析成 integer；这里统一转成 double，避免类型异常。
     double double_parameter(const std::string& name) {
@@ -379,34 +280,26 @@ private:
             return static_cast<double>(parameter.as_int());
         return parameter.as_double();
     }
-    void set_angles(const std::array<double, 3>& angles) {
+    void set_angles(const std::array<double, 4>& angles) {
+        bool changed = false;
+        for (std::size_t i = 0; i < angles.size(); ++i)
+            changed |= !last_servo_angles_[i] || *last_servo_angles_[i] != angles[i];
         for (std::size_t i = 0; i < angles.size(); ++i) {
             *servo_angles_[i] = angles[i];
             last_servo_angles_[i] = angles[i];
         }
+        if (changed)
+            RCLCPP_INFO(
+                get_logger(),
+                "Servo targets: left_switch=%d right_switch=%d safety_locked=%s "
+                "PWM1=%.1f PWM2=%.1f PWM3=%.1f PWM4=%.1f deg",
+                switch_left_.ready() ? static_cast<int>(*switch_left_) : -1,
+                switch_right_.ready() ? static_cast<int>(*switch_right_) : -1,
+                safety_locked_ ? "yes" : "no",
+                angles[0], angles[1], angles[2], angles[3]);
     }
     double deadband(double value) const {
         return std::abs(value) > joystick_deadzone_ ? value : 0.0;
-    }
-    void set_trigger_target(const TriggerPosition& position) {
-        if (!trigger_position_initialized_)
-            return;
-        // 只更新目标指令，实际输出由 publish_motor_targets() 按斜率逼近，避免阶跃。
-        trigger_motor_command_value_ =
-            limited_trigger_target(trigger_position_value(position));
-        RCLCPP_INFO(
-            get_logger(), "Trigger motor selected angle: %.2f deg from startup origin",
-            (trigger_motor_command_value_ - trigger_motor_origin_) * 180.0 / std::numbers::pi);
-    }
-    double trigger_position_value(const TriggerPosition& position) const {
-        return trigger_motor_origin_ + position.angle_deg * std::numbers::pi / 180.0;
-    }
-    double current_trigger_velocity_limit() const {
-        if (trigger_fire_position_selected_)
-            return trigger_fire_velocity_limit_;
-        if (trigger_contact_position_selected_)
-            return trigger_contact_velocity_limit_;
-        return trigger_pre_fire_velocity_limit_;
     }
     void publish_motor_targets() {
         // Clamp the accumulator too, so reversing the stick immediately leaves the limit.
@@ -418,21 +311,10 @@ private:
             yaw_target_value_ = limited_target(yaw_target_value_, 2);
         if (distance_position_initialized_)
             distance_target_value_ = limited_target(distance_target_value_, 3);
-        // 1 kHz 更新：目标按配置的输出轴角速度斜坡靠近指令值。
-        const double slew_rate = current_trigger_velocity_limit();
-        const double max_step = slew_rate * 0.001;
-        const double previous_target = trigger_motor_target_value_;
-        trigger_motor_target_value_ += std::clamp(
-            trigger_motor_command_value_ - trigger_motor_target_value_, -max_step, max_step);
-        trigger_motor_target_value_ = limited_trigger_target(trigger_motor_target_value_);
-        trigger_motor_target_slew_deg_s_ =
-            (trigger_motor_target_value_ - previous_target) * 1000.0 * 180.0 / std::numbers::pi;
         if (trigger_pair_initialized_) {
             *trigger_target_[0] = trigger_target_value_[0];
             *trigger_target_[1] = trigger_target_value_[1];
         }
-        if (trigger_position_initialized_)
-            *trigger_motor_target_ = trigger_motor_target_value_;
         if (yaw_position_initialized_)
             *yaw_target_ = yaw_target_value_;
         if (distance_position_initialized_)
@@ -444,41 +326,24 @@ private:
         return std::clamp(target, motor_origins_[index] + motor_min_[index],
                           motor_origins_[index] + motor_max_[index]);
     }
-    double limited_trigger_target(double target) const {
-        if (!std::isfinite(target))
-            target = trigger_motor_origin_;
-        return std::clamp(target, trigger_motor_min_, trigger_motor_max_);
-    }
-    void hold_motor_positions() {
-        if (!trigger_position_initialized_)
-            return;
-        // M2006 始终保持启动时锁存的绝对回位位置，回位途中进入安全状态也不改目标。
-        trigger_fire_position_selected_ = false;
-        trigger_contact_position_selected_ = false;
-        trigger_motor_command_value_ =
-            limited_trigger_target(trigger_position_value(trigger_pre_fire_position_));
-        publish_motor_targets();
-    }
     InputInterface<bool> motor_feedback_ready_;
     InputInterface<bool> yaw_motor_feedback_ready_, distance_motor_feedback_ready_;
     InputInterface<bool> trigger_pair_feedback_ready_;
-    InputInterface<bool> trigger_motor_feedback_ready_;
     std::array<double, 4> motor_min_{}, motor_max_{}, motor_origins_{};
     InputInterface<rmcs_msgs::Switch> switch_left_, switch_right_;
     InputInterface<Eigen::Vector2d> joystick_left_, joystick_right_;
     InputInterface<bool> fire_button_, reload_button_, reload_cancel_button_;
-    std::array<OutputInterface<double>, 3> servo_angles_;
-    std::array<std::optional<double>, 3> last_servo_angles_;
-    InputInterface<double> trigger_angle_[2], trigger_motor_angle_, trigger_motor_velocity_;
-    InputInterface<int> trigger_motor_encoder_raw_;
+    std::array<OutputInterface<double>, 4> servo_angles_;
+    std::array<std::optional<double>, 4> last_servo_angles_;
+    InputInterface<double> trigger_angle_[2];
     InputInterface<double> yaw_angle_, distance_angle_, yaw_velocity_, distance_velocity_;
-    OutputInterface<double> trigger_target_[2], trigger_motor_target_, yaw_target_, distance_target_;
+    OutputInterface<double> trigger_target_[2], yaw_target_, distance_target_;
     State state_ = State::kSafe;
-    std::array<double, 3> safe_angles_{90.0, 90.0, 90.0};
-    std::array<std::array<double, 3>, 3> reload_angles_{};
-    std::array<std::array<double, 3>, 3> reload_return_angles_{};
-    std::array<double, 3> fire_return_angles_{};
-    std::array<double, 3> fire_angles_{90.0, 90.0, 90.0};
+    std::array<double, 4> safe_angles_{90.0, 90.0, 90.0, 90.0};
+    std::array<std::array<double, 4>, 3> reload_angles_{};
+    std::array<std::array<double, 4>, 3> reload_return_angles_{};
+    std::array<double, 4> pre_fire_angles_{}, contact_angles_{}, fire_return_angles_{};
+    std::array<double, 4> fire_angles_{90.0, 90.0, 90.0, 90.0};
     std::array<int, 3> reload_interval_ticks_{2000, 2000, 2000};
     int ticks_ = 0;
     int reload_stage_ = 0;
@@ -492,7 +357,6 @@ private:
     bool trigger_pair_initialized_ = false;
     bool yaw_position_initialized_ = false;
     bool distance_position_initialized_ = false;
-    bool trigger_position_initialized_ = false;
     std::array<double, 2> trigger_target_value_{};
     double yaw_target_value_ = 0.0;
     double distance_target_value_ = 0.0;
@@ -500,18 +364,6 @@ private:
     double distance_velocity_limit_ = 10.0;
     double trigger_adjust_sensitivity_ = 0.002;
     double joystick_deadzone_ = 0.08;
-    TriggerPosition trigger_fire_position_{}, trigger_pre_fire_position_{}, trigger_contact_position_{};
-    double trigger_motor_origin_ = 0.0;
-    double trigger_motor_command_value_ = 0.0;
-    double trigger_motor_target_value_ = 0.0;
-    double trigger_motor_target_slew_deg_s_ = 0.0;
-    double trigger_pre_fire_velocity_limit_ = 1.0;
-    double trigger_contact_velocity_limit_ = 1.0;
-    double trigger_fire_velocity_limit_ = 5.0;
-    bool trigger_fire_position_selected_ = false;
-    bool trigger_contact_position_selected_ = false;
-    double trigger_motor_min_ = 0.0, trigger_motor_max_ = 0.0;
-    double trigger_min_angle_deg_ = 0.0, trigger_max_angle_deg_ = 0.0;
 };
 
 } // namespace rmcs_core::controller::shooting
